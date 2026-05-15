@@ -1,0 +1,293 @@
+# ══════════════════════════════════════════════════════════════════════
+#  مولّد داتا التدريب — GitHub Actions Workflow
+#  الميزات:
+#    ✅ تشغيل يدوي مع إعدادات مخصصة
+#    ✅ تنزيل checkpoint من GitHub Releases (استئناف تلقائي)
+#    ✅ رفع checkpoint + dataset إلى GitHub Releases بعد كل جلسة
+#    ✅ إعادة التشغيل التلقائي عند اقتراب حد الـ 6 ساعات
+#    ✅ مفاتيح API متعددة عبر GitHub Secrets
+#    ✅ ملخص تقرير في نهاية كل جلسة
+# ══════════════════════════════════════════════════════════════════════
+
+name: 🤖 Generate Training Dataset
+
+on:
+  # ── تشغيل يدوي مع إعدادات مخصصة ──────────────────────────────────
+  workflow_dispatch:
+    inputs:
+      samples_per_topic:
+        description: "عدد العينات لكل موضوع (1–50)"
+        required: false
+        default: "10"
+        type: string
+
+      force_restart:
+        description: "ابدأ من الصفر وتجاهل الـ checkpoint"
+        required: false
+        default: false
+        type: boolean
+
+      delay_per_key:
+        description: "تأخير بين الطلبات لكل مفتاح (ثانية)"
+        required: false
+        default: "1.5"
+        type: string
+
+      max_retries:
+        description: "عدد محاولات إعادة المهمة عند الفشل"
+        required: false
+        default: "3"
+        type: string
+
+      save_every:
+        description: "حفظ تلقائي كل N عينة"
+        required: false
+        default: "30"
+        type: string
+
+      run_mode:
+        description: "وضع التشغيل"
+        required: false
+        default: "generate"
+        type: choice
+        options:
+          - generate       # التوليد العادي (مع استئناف)
+          - retry-failed   # إعادة المهام الفاشلة فقط
+          - stats          # عرض إحصاء الملف الموجود فقط
+
+  # ── إمكانية الاستدعاء من workflow آخر ────────────────────────────
+  workflow_call:
+    inputs:
+      samples_per_topic:
+        type: string
+        default: "10"
+      force_restart:
+        type: boolean
+        default: false
+
+
+# ─────────────────────────────────────────────────────────────────────
+permissions:
+  contents: write   # مطلوب لرفع GitHub Releases
+  actions:  write   # مطلوب لإعادة التشغيل التلقائي
+# ─────────────────────────────────────────────────────────────────────
+
+env:
+  RELEASE_TAG:      "dataset-checkpoint"
+  CHECKPOINT_FILE:  "checkpoint.json"
+  OUTPUT_FILE:      "training_dataset.json"
+  FAILED_FILE:      "failed_tasks.json"
+  PYTHON_VERSION:   "3.11"
+
+jobs:
+  generate:
+    name: "توليد الداتا"
+    runs-on: ubuntu-latest
+
+    # ⏱️ حد زمني: 5 ساعات و50 دقيقة (بفارق 10 دقائق قبل حد GitHub)
+    timeout-minutes: 350
+
+    steps:
+
+      # ── 1. تحميل الكود ─────────────────────────────────────────────
+      - name: "⬇️ تحميل الكود"
+        uses: actions/checkout@v4
+
+      # ── 2. إعداد Python ────────────────────────────────────────────
+      - name: "🐍 إعداد Python ${{ env.PYTHON_VERSION }}"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      # ── 3. تثبيت المكتبات ──────────────────────────────────────────
+      - name: "📦 تثبيت المكتبات"
+        run: |
+          pip install --upgrade pip
+          pip install google-genai>=0.5.0
+
+      # ── 4. تنزيل الـ checkpoint من GitHub Releases ─────────────────
+      - name: "📥 تنزيل الـ Checkpoint (إن وُجد)"
+        if: ${{ !inputs.force_restart }}
+        continue-on-error: true   # لا تفشل لو لا يوجد release بعد
+        run: |
+          echo "جاري البحث عن checkpoint موجود..."
+
+          # تنزيل الملفات من الـ release (لو موجودة)
+          gh release download "${{ env.RELEASE_TAG }}" \
+            --dir . \
+            --pattern "*.json" \
+            2>/dev/null && echo "✅ تم تنزيل الـ checkpoint" \
+            || echo "ℹ️ لا يوجد checkpoint سابق — سيبدأ من الصفر"
+
+          # عرض ما تم تنزيله
+          ls -lh *.json 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 5. عرض المعلومات قبل التشغيل ──────────────────────────────
+      - name: "📋 معلومات الجلسة"
+        run: |
+          echo "════════════════════════════════════════"
+          echo "  إعدادات الجلسة:"
+          echo "  وضع التشغيل    : ${{ inputs.run_mode || 'generate' }}"
+          echo "  عينات/موضوع   : ${{ inputs.samples_per_topic || '10' }}"
+          echo "  بداية جديدة   : ${{ inputs.force_restart || 'false' }}"
+          echo "  تأخير/مفتاح   : ${{ inputs.delay_per_key || '1.5' }}s"
+          echo "  حفظ كل        : ${{ inputs.save_every || '30' }} عينة"
+          echo "════════════════════════════════════════"
+
+          # عرض checkpoint الموجود
+          if [ -f "${{ env.CHECKPOINT_FILE }}" ]; then
+            echo "📌 checkpoint موجود:"
+            python3 -c "
+          import json
+          cp = json.load(open('${{ env.CHECKPOINT_FILE }}'))
+          print(f\"  مكتمل: {cp.get('count', 0)} عينة\")
+          print(f\"  آخر حفظ: {cp.get('saved_at', 'غير معروف')}\")
+          " 2>/dev/null || true
+          else
+            echo "📌 لا يوجد checkpoint — سيبدأ من الصفر"
+          fi
+
+      # ── 6. تشغيل السكريبت الرئيسي ──────────────────────────────────
+      - name: "🚀 تشغيل مولّد الداتا"
+        run: |
+          RUN_MODE="${{ inputs.run_mode || 'generate' }}"
+
+          if [ "$RUN_MODE" = "retry-failed" ]; then
+            SCRIPT_ARG="--retry-failed"
+          elif [ "$RUN_MODE" = "stats" ]; then
+            SCRIPT_ARG="--stats"
+          else
+            SCRIPT_ARG=""
+          fi
+
+          python generate_dataset.py $SCRIPT_ARG
+        env:
+          # ── مفاتيح API من GitHub Secrets ──────────────────────────
+          # أضف في الريبو: Settings → Secrets → Actions
+          # GEMINI_KEY_1, GEMINI_KEY_2, ... إلخ
+          GEMINI_API_KEYS: >-
+            ${{ secrets.GEMINI_KEY_1 }},${{ secrets.GEMINI_KEY_2 }},${{ secrets.GEMINI_KEY_3 }}
+
+          # ── إعدادات من inputs ──────────────────────────────────────
+          SAMPLES_PER_TOPIC:  ${{ inputs.samples_per_topic || '10' }}
+          DELAY_PER_KEY:      ${{ inputs.delay_per_key    || '1.5' }}
+          MAX_RETRIES:        ${{ inputs.max_retries      || '3' }}
+          SAVE_EVERY:         ${{ inputs.save_every       || '30' }}
+          FORCE_RESTART:      ${{ inputs.force_restart    || 'false' }}
+
+          # ── حد زمني: 5 ساعات و20 دقيقة (أقل من timeout الجوب) ───
+          MAX_RUNTIME_SEC:    "19200"
+
+          # ── مسارات الملفات ─────────────────────────────────────────
+          OUTPUT_FILE:     ${{ env.OUTPUT_FILE }}
+          CHECKPOINT_FILE: ${{ env.CHECKPOINT_FILE }}
+          FAILED_FILE:     ${{ env.FAILED_FILE }}
+
+      # ── 7. عرض إحصاء الجلسة ────────────────────────────────────────
+      - name: "📊 ملخص الجلسة"
+        if: always()
+        run: |
+          echo "════════════════════════════════════════"
+          echo "  ملف الإخراج:"
+          ls -lh ${{ env.OUTPUT_FILE }} 2>/dev/null \
+            && python3 -c "
+          import json
+          data = json.load(open('${{ env.OUTPUT_FILE }}'))
+          print(f'  عدد العينات: {len(data)}')
+          " || echo "  (لا يوجد ملف إخراج)"
+
+          echo ""
+          echo "  الملفات الموجودة:"
+          ls -lh *.json *.log 2>/dev/null || true
+          echo "════════════════════════════════════════"
+
+      # ── 8. رفع الـ Checkpoint والداتا إلى GitHub Releases ──────────
+      - name: "⬆️ رفع الـ Checkpoint إلى Releases"
+        if: always()
+        run: |
+          FILES_TO_UPLOAD=""
+
+          # اجمع الملفات الموجودة
+          for f in \
+            "${{ env.CHECKPOINT_FILE }}" \
+            "${{ env.OUTPUT_FILE }}" \
+            "${{ env.FAILED_FILE }}" \
+            "generator.log"
+          do
+            [ -f "$f" ] && FILES_TO_UPLOAD="$FILES_TO_UPLOAD $f"
+          done
+
+          if [ -z "$FILES_TO_UPLOAD" ]; then
+            echo "لا توجد ملفات لرفعها."
+            exit 0
+          fi
+
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+          SAMPLE_COUNT=0
+          if [ -f "${{ env.OUTPUT_FILE }}" ]; then
+            SAMPLE_COUNT=$(python3 -c "import json; print(len(json.load(open('${{ env.OUTPUT_FILE }}'))))" 2>/dev/null || echo 0)
+          fi
+
+          # أنشئ أو حدّث الـ Release
+          if gh release view "${{ env.RELEASE_TAG }}" &>/dev/null; then
+            # الـ Release موجود — حدّث الملفات
+            gh release upload "${{ env.RELEASE_TAG }}" \
+              $FILES_TO_UPLOAD \
+              --clobber
+            gh release edit "${{ env.RELEASE_TAG }}" \
+              --title "📊 Dataset Checkpoint — $SAMPLE_COUNT عينة" \
+              --notes "آخر تحديث: $TIMESTAMP | عينات: $SAMPLE_COUNT"
+          else
+            # الـ Release غير موجود — أنشئه
+            gh release create "${{ env.RELEASE_TAG }}" \
+              $FILES_TO_UPLOAD \
+              --title "📊 Dataset Checkpoint — $SAMPLE_COUNT عينة" \
+              --notes "أول checkpoint | $TIMESTAMP | عينات: $SAMPLE_COUNT" \
+              --prerelease
+          fi
+
+          echo "✅ تم الرفع بنجاح — $SAMPLE_COUNT عينة محفوظة"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 9. إعادة التشغيل التلقائي إذا اقترب الحد الزمني ────────────
+      - name: "🔄 إعادة التشغيل التلقائي (عند الحاجة)"
+        if: always()
+        run: |
+          if [ -f "needs_restart.flag" ]; then
+            echo "⏰ تم اكتشاف إشارة إعادة التشغيل — جاري إطلاق جلسة جديدة..."
+
+            # تشغيل نسخة جديدة من الـ workflow بنفس الإعدادات
+            gh workflow run \
+              "$(basename ${{ github.workflow_ref }} | cut -d@ -f1)" \
+              --ref "${{ github.ref_name }}" \
+              -f samples_per_topic="${{ inputs.samples_per_topic || '10' }}" \
+              -f force_restart="false" \
+              -f delay_per_key="${{ inputs.delay_per_key || '1.5' }}" \
+              -f max_retries="${{ inputs.max_retries || '3' }}" \
+              -f save_every="${{ inputs.save_every || '30' }}" \
+              -f run_mode="generate"
+
+            echo "✅ تم إطلاق جلسة جديدة — ستستكمل من نقطة التوقف"
+          else
+            echo "✅ المهمة مكتملة — لا حاجة لإعادة التشغيل"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 10. رفع ملف الداتا النهائي كـ Artifact أيضاً ──────────────
+      - name: "📤 رفع الداتا كـ Artifact"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "training-dataset-${{ github.run_number }}"
+          path: |
+            ${{ env.OUTPUT_FILE }}
+            ${{ env.CHECKPOINT_FILE }}
+            ${{ env.FAILED_FILE }}
+            generator.log
+          if-no-files-found: ignore
+          retention-days: 30
