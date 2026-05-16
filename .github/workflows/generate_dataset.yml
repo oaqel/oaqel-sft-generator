@@ -98,7 +98,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
+          
 
       # ── 3. تثبيت المكتبات ──────────────────────────────────────────
       - name: "📦 تثبيت المكتبات"
