@@ -85,7 +85,7 @@ GEMINI_API_KEYS: list[str] = _env_list("GEMINI_API_KEYS", [
     "YOUR_GEMINI_API_KEY_3",
 ])
 
-MODEL_ID            = _env("MODEL_ID",          "gemini-2.0-flash")
+MODEL_ID            = _env("MODEL_ID",          "gemma-4-26b-a4b-it")
 OUTPUT_FILE         = _env("OUTPUT_FILE",        "training_dataset.json")
 CHECKPOINT_FILE     = _env("CHECKPOINT_FILE",    "checkpoint.json")
 FAILED_FILE         = _env("FAILED_FILE",        "failed_tasks.json")
@@ -96,7 +96,7 @@ DELAY_PER_KEY       = float(_env("DELAY_PER_KEY",    "1.5"))   # ثانية بي
 SAVE_EVERY          = _env_int("SAVE_EVERY",          10)       # حفظ كل N عينة
 MAX_RETRIES         = _env_int("MAX_RETRIES",          3)
 FORCE_RESTART       = _env_bool("FORCE_RESTART",       False)
-MAX_RUNTIME_SEC     = _env_int("MAX_RUNTIME_SEC", 5 * 3600 + 30 * 60)  # 5.5 ساعة
+MAX_RUNTIME_SEC     = _env_int("MAX_RUNTIME_SEC", 50 * 36000 + 300 * 600)  # 5.5 ساعة
 
 # ميزانية الكلمات لكل حقل
 WORD_BUDGETS: dict[str, int] = {
